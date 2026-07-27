@@ -28,7 +28,8 @@ dev_dependencies:
 
 flutter_launcher_icons:
   android: true
-  ios: false
+  ios: true
+  remove_alpha_ios: true
   image_path: "assets/Basketbrook_Trails_additional_assets/Icon.png"
   adaptive_icon_background: "assets/Basketbrook_Trails_additional_assets/Icon.png"
   adaptive_icon_foreground: "assets/Basketbrook_Trails_additional_assets/icon_transparent.png"
