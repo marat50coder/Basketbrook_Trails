@@ -1,3 +1,4 @@
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -9,6 +10,17 @@ import 'core/image_bank.dart';
 import 'core/storage.dart';
 import 'loading/loading_screen.dart';
 import 'menu/home_screen.dart';
+import 'trailgate/boot_gate.dart';
+import 'trailgate/config/trail_gate_config.dart';
+import 'trailgate/core/gate_models.dart';
+import 'trailgate/infra/gate_exchange.dart';
+import 'trailgate/infra/push_relay.dart';
+import 'trailgate/infra/reach_probe.dart';
+import 'trailgate/infra/trail_agent.dart';
+import 'trailgate/infra/trail_attribution.dart';
+import 'trailgate/infra/trail_vault.dart';
+import 'trailgate/pages/trail_portal.dart';
+import 'trailgate/trail_coordinator.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,44 +29,152 @@ Future<void> main() async {
     statusBarIconBrightness: Brightness.dark,
   ));
 
-  final storage = await GameStorage.open();
+  // ── Gray-flow services ────────────────────────────────────────────────
+  final vault = TrailVault();
+  final agent = TrailAgent();
+
+  // ── White-game services ───────────────────────────────────────────────
+  final storageFuture = GameStorage.open();
+
+  await Future.wait<void>(<Future<void>>[
+    vault.initialize(),
+    agent.prepare(),
+  ]);
+
+  final storage = await storageFuture;
   final audio = AudioController();
-  // Warm the audio cache immediately so the very first tap/pickup plays with
-  // no perceptible delay.
   audio.preload();
   final images = ImageBank();
   final state = GameState(storage: storage, audio: audio, images: images);
 
-  runApp(BasketbrookApp(state: state));
+  assert(() {
+    debugPrint(
+      '[BB.BOOT] credentialsReady=${TrailGateConfig.grayCredentialsReady} '
+      'endpoint=${TrailGateConfig.endpoint} '
+      'afKeyLen=${TrailGateConfig.appsFlyerKey.length} '
+      'fbNum=${TrailGateConfig.firebaseProjectNumber}',
+    );
+    return true;
+  }());
+
+  var productionServicesReady = false;
+  if (TrailGateConfig.grayCredentialsReady) {
+    try {
+      await Firebase.initializeApp();
+      productionServicesReady = true;
+    } catch (error) {
+      assert(() {
+        debugPrint('[BB.BOOT] Firebase.initializeApp failed: $error');
+        return true;
+      }());
+    }
+  }
+
+  final probe = ReachProbe();
+  // Attribution + config POST must run even if Firebase failed to init; only
+  // push/FCM needs productionServicesReady.
+  final notifications = PushRelay(vault, enabled: productionServicesReady);
+  final attribution = TrailAttribution(agent);
+  final coordinator = TrailCoordinator(
+    vault: vault,
+    probe: probe,
+    attribution: attribution,
+    exchange: GateExchange(agent, vault),
+    notifications: notifications,
+    agent: agent,
+    runtimeEnabled: TrailGateConfig.grayCredentialsReady,
+  );
+
+  // Kick AppsFlyer/ATT off before the first frame renders. On iOS 18+ a fresh
+  // install's conversion callback can take 10–15 s; warming up here means the
+  // BootGate almost always sees ready install data when it calls decide().
+  coordinator.warmUp();
+
+  runApp(BasketbrookApp(state: state, coordinator: coordinator));
 }
 
-class BasketbrookApp extends StatelessWidget {
-  const BasketbrookApp({super.key, required this.state});
+class BasketbrookApp extends StatefulWidget {
+  const BasketbrookApp({
+    super.key,
+    required this.state,
+    required this.coordinator,
+  });
 
   final GameState state;
+  final TrailCoordinator coordinator;
+
+  @override
+  State<BasketbrookApp> createState() => _BasketbrookAppState();
+}
+
+class _BasketbrookAppState extends State<BasketbrookApp> {
+  final GlobalKey<NavigatorState> _navKey = GlobalKey<NavigatorState>();
+
+  @override
+  void initState() {
+    super.initState();
+    widget.coordinator.onLatePortal = _routeLatePortal;
+  }
+
+  @override
+  void dispose() {
+    if (widget.coordinator.onLatePortal == _routeLatePortal) {
+      widget.coordinator.onLatePortal = null;
+    }
+    super.dispose();
+  }
+
+  /// AppsFlyer delivered non-organic data *after* the initial gate decision
+  /// (e.g. the user was already routed to the white game via a 404 fallback).
+  /// Swap the top route for the portal — the game state stays alive underneath
+  /// in case the user re-opens the app.
+  void _routeLatePortal(PortalStop stop) {
+    final navigator = _navKey.currentState;
+    if (navigator == null) return;
+    final coordinator = widget.coordinator;
+    navigator.pushAndRemoveUntil(
+      MaterialPageRoute<void>(
+        builder: (_) => TrailPortal(
+          url: stop.url,
+          coldLaunch: stop.coldLaunch,
+          vault: coordinator.vault,
+          probe: coordinator.probe,
+          notifications: coordinator.notifications,
+          agent: coordinator.agent,
+        ),
+      ),
+      (_) => false,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider.value(
-      value: state,
+      value: widget.state,
       child: MaterialApp(
+        navigatorKey: _navKey,
         title: 'Basketbrook Trails',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.build(),
-        home: const _Root(),
+        home: BootGate(
+          coordinator: widget.coordinator,
+          gameBuilder: (_) => const GameRoot(),
+        ),
       ),
     );
   }
 }
 
-class _Root extends StatefulWidget {
-  const _Root();
+/// White-game entry: shows the game's own loading screen (image precache +
+/// landscape lock) and then the home menu.
+class GameRoot extends StatefulWidget {
+  const GameRoot({super.key});
 
   @override
-  State<_Root> createState() => _RootState();
+  State<GameRoot> createState() => _GameRootState();
 }
 
-class _RootState extends State<_Root> {
+class _GameRootState extends State<GameRoot> {
   bool _loaded = false;
 
   Future<void> _onLoaded() async {

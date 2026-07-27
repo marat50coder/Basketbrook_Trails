@@ -2,7 +2,7 @@ name: basketbrook_trails
 description: "Basketbrook Trails - chicken chain trail runner"
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 1.0.1+3
 
 environment:
   sdk: ^3.12.2
@@ -18,6 +18,15 @@ dependencies:
   audioplayers: ^6.1.0
   connectivity_plus: ^6.1.0
   provider: ^6.1.2
+  firebase_core: ^4.12.1
+  firebase_messaging: ^16.4.3
+  appsflyer_sdk: ^6.18.1
+  app_tracking_transparency: ^2.0.7
+  device_info_plus: ^13.2.0
+  flutter_secure_storage: ^10.3.1
+  http: ^1.6.0
+  url_launcher: ^6.3.2
+  webview_flutter_wkwebview: ^3.26.0
 
 dev_dependencies:
   flutter_test:
@@ -39,6 +48,10 @@ flutter:
   uses-material-design: true
 
   assets:
+    - assets/Vertical_Notifications_Screen.webp
+    - assets/Horizontal_Notifications_Screen.webp
+    - assets/Vertical_Nowifi_Screen.webp
+    - assets/Horizontal_Nowifi_Screen.webp
     - assets/Basketbrook_Trails_additional_assets/
     - assets/Basketbrook_Trails_gameplay_assets/
     - assets/Basketbrook_Trails_sounds_assets/
