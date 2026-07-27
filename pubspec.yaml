@@ -45,6 +45,15 @@ flutter_launcher_icons:
   min_sdk_android: 23
 
 flutter:
+  # Force CocoaPods on iOS (both locally and on CI). We ship Firebase via
+  # CocoaPods; Flutter's automatic SwiftPM integration in 3.44+ tries to
+  # add Firebase as a Swift Package too, which collides with the pod and
+  # blows up archive with "Redefinition of module 'Firebase'". Setting
+  # this here (checked into the repo) makes Codemagic honour the choice
+  # instead of falling back to global SwiftPM enabled.
+  config:
+    enable-swift-package-manager: false
+
   uses-material-design: true
 
   assets:
