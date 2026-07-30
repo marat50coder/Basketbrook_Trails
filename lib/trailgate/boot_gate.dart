@@ -33,8 +33,17 @@ class _BootGateState extends State<BootGate> {
   bool _started = false;
   bool _navigating = false;
   late final DateTime _startTime;
-  Timer? _hardDeadline;
+  // Last-resort cap so a wedged pipeline can never keep the splash up forever.
+  // It is deliberately longer than every internal timeout in the coordinator
+  // (AppsFlyer wait + probes + config POST) so it only fires on a genuine
+  // hang — never mid-flight — which is what used to swap the splash for the
+  // game's loading screen while attribution was still resolving.
+  static const Duration _decideDeadline = Duration(seconds: 30);
   static const Duration _minSplash = Duration(milliseconds: 1600);
+  // Fill animation of the progress bar. Navigation waits this out (plus a
+  // frame) after progress hits 100% so the bar is visibly full before the
+  // notification screen / WebView takes over.
+  static const Duration _barFill = Duration(milliseconds: 320);
 
   @override
   void initState() {
@@ -45,18 +54,6 @@ class _BootGateState extends State<BootGate> {
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
-    _hardDeadline = Timer(const Duration(seconds: 12), () {
-      if (mounted && !_navigating && _destination == null) {
-        _destination = const NativeStop();
-        _maybeNavigate();
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _hardDeadline?.cancel();
-    super.dispose();
   }
 
   @override
@@ -76,26 +73,41 @@ class _BootGateState extends State<BootGate> {
       _maybeNavigate();
       return;
     }
+    GateStop decided;
     try {
-      _destination = await coordinator.decide(
-        onProgress: (value) {
-          if (mounted) setState(() => _progress = value.clamp(0.0, 1.0));
-        },
-      );
+      // Stay on THIS single loading screen until the gate makes its one and
+      // only decision — no premature swap to the game's loading screen.
+      decided = await coordinator
+          .decide(
+            onProgress: (value) {
+              if (mounted) setState(() => _progress = value.clamp(0.0, 1.0));
+            },
+          )
+          .timeout(_decideDeadline, onTimeout: () => const NativeStop());
     } catch (_) {
-      _destination = const NativeStop();
+      decided = const NativeStop();
     }
+
+    _destination = decided;
     if (mounted) setState(() => _progress = 1);
-    _hardDeadline?.cancel();
     _maybeNavigate();
   }
 
   Future<void> _maybeNavigate() async {
     if (_navigating || _destination == null) return;
+    // Force the bar to 100% and give the fill animation time to run to the
+    // end before we leave, so the user never sees a half-filled bar swapped
+    // out for the notification screen / WebView.
+    if (mounted && _progress < 1) setState(() => _progress = 1);
     final elapsed = DateTime.now().difference(_startTime);
     if (elapsed < _minSplash) {
       await Future<void>.delayed(_minSplash - elapsed);
     }
+    if (!mounted || _navigating) return;
+    // Let the progress bar finish animating to the far edge (the tween only
+    // starts once progress becomes 1, which for a slow pipeline happens well
+    // after the minimum splash has already elapsed).
+    await Future<void>.delayed(_barFill + const Duration(milliseconds: 80));
     if (!mounted || _navigating) return;
     _navigating = true;
     // Only lock portrait on the way to the permit / offline / portal screens —
@@ -170,7 +182,7 @@ class _BootGateState extends State<BootGate> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF184A20),
+      backgroundColor: Colors.black,
       body: OrientationBuilder(
         builder: (context, orientation) {
           final isLandscape = orientation == Orientation.landscape;
@@ -186,7 +198,7 @@ class _BootGateState extends State<BootGate> {
                 fit: BoxFit.cover,
                 filterQuality: FilterQuality.high,
                 errorBuilder: (_, _, _) =>
-                    const ColoredBox(color: Color(0xFF184A20)),
+                    const ColoredBox(color: Colors.black),
               ),
               Align(
                 alignment: Alignment.bottomCenter,
@@ -194,6 +206,7 @@ class _BootGateState extends State<BootGate> {
                   padding: EdgeInsets.only(bottom: isLandscape ? 24 : 56),
                   child: _ProgressBar(
                     progress: _progress,
+                    fillDuration: _barFill,
                     width: isLandscape ? size.width * 0.42 : size.width * 0.74,
                   ),
                 ),
@@ -207,10 +220,15 @@ class _BootGateState extends State<BootGate> {
 }
 
 class _ProgressBar extends StatelessWidget {
-  const _ProgressBar({required this.progress, required this.width});
+  const _ProgressBar({
+    required this.progress,
+    required this.width,
+    required this.fillDuration,
+  });
 
   final double progress;
   final double width;
+  final Duration fillDuration;
 
   @override
   Widget build(BuildContext context) {
@@ -232,7 +250,7 @@ class _ProgressBar extends StatelessWidget {
           child: Align(
             alignment: Alignment.centerLeft,
             child: TweenAnimationBuilder<double>(
-              duration: const Duration(milliseconds: 320),
+              duration: fillDuration,
               curve: Curves.easeOut,
               tween: Tween(begin: 0, end: progress.clamp(0.0, 1.0)),
               builder: (context, value, _) {

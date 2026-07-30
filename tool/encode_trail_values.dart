@@ -2,62 +2,64 @@
 
 import 'dart:typed_data';
 
-// Keep this salt + position multiplier in sync with
-// lib/trailgate/core/brook_codec.dart. Change them BOTH here and there when
-// re-fingerprinting, then re-run this tool and paste the arrays into
-// lib/trailgate/config/trail_gate_config.dart.
-const List<int> _brookSalt = <int>[
-  0x9E, 0x37, 0x79, 0xB1, 0x2C, 0x84, 0x5A, 0xF3,
-  0x6D, 0x11, 0xC8, 0x4B, 0x20, 0xE7, 0x53, 0xA6,
-];
-const int _posMul = 29;
+// Keep the algorithm + constants below in sync with
+// lib/trailgate/core/brook_codec.dart. Change BOTH files when
+// re-fingerprinting this project, then re-run this tool and paste the
+// printed arrays into lib/trailgate/config/trail_gate_config.dart.
+const int _fnvOffsetBasis = 0x811c9dc5;
+const int _fnvPrime = 0x01000193;
+const int _lcgMultiplier = 1103515245;
+const int _lcgIncrement = 12345;
+const int _lcgMask = 0xffffffff;
+const int _rippleStep = 0x5b;
 
-Uint8List _buildBrookStream(int length) {
-  final state = List<int>.generate(256, (index) => index);
-  var cursor = 0;
-  for (var index = 0; index < state.length; index++) {
-    cursor =
-        (cursor + state[index] + _brookSalt[index % _brookSalt.length]) & 0xff;
-    final swap = state[index];
-    state[index] = state[cursor];
-    state[cursor] = swap;
+const List<int> _brookSalt = <int>[
+  0xB7, 0x2E, 0x5A, 0x91, 0xC3, 0x0D, 0x74, 0xF1,
+  0x88, 0x46, 0xA9, 0x22, 0xDE, 0x63, 0x35, 0xCC,
+  0x1F, 0x9B, 0x50,
+];
+
+int _fnvDigestOfSalt() {
+  var digest = _fnvOffsetBasis;
+  for (final byte in _brookSalt) {
+    digest = ((digest ^ (byte & 0xff)) * _fnvPrime) & _lcgMask;
   }
-  final result = Uint8List(length);
-  var left = 0;
-  var right = 0;
-  for (var index = 0; index < length; index++) {
-    left = (left + 1) & 0xff;
-    right = (right + state[left] + index) & 0xff;
-    final swap = state[left];
-    state[left] = state[right];
-    state[right] = swap;
-    result[index] = state[(state[left] + state[right]) & 0xff];
-  }
-  return result;
+  return digest;
+}
+
+final int _saltDigest = _fnvDigestOfSalt();
+
+int _brookKeyAt(int position) {
+  var mixed = _saltDigest;
+  mixed = ((mixed ^ (position & 0xff)) * _fnvPrime) & _lcgMask;
+  mixed = ((mixed ^ ((position >> 8) & 0xff)) * _fnvPrime) & _lcgMask;
+  mixed = ((mixed * _lcgMultiplier) + _lcgIncrement) & _lcgMask;
+  final upper = (mixed >> 24) & 0xff;
+  final middle = (mixed >> 13) & 0xff;
+  final ripple = (position * _rippleStep) & 0xff;
+  return (upper ^ middle ^ ripple) & 0xff;
 }
 
 List<int> fold(String value) {
   final bytes = Uint8List.fromList(value.codeUnits);
-  final stream = _buildBrookStream(bytes.length);
   return List<int>.generate(
     bytes.length,
-    (index) => (bytes[index] + stream[index] + (index * _posMul)) & 0xff,
+    (index) => (bytes[index] ^ _brookKeyAt(index)) & 0xff,
   );
 }
 
 String unfold(List<int> encoded) {
-  final stream = _buildBrookStream(encoded.length);
-  return String.fromCharCodes(
-    List<int>.generate(
-      encoded.length,
-      (index) => (encoded[index] - stream[index] - (index * _posMul)) & 0xff,
-    ),
-  );
+  if (encoded.isEmpty) return '';
+  final plain = Uint8List(encoded.length);
+  for (var index = 0; index < encoded.length; index++) {
+    plain[index] = (encoded[index] ^ _brookKeyAt(index)) & 0xff;
+  }
+  return String.fromCharCodes(plain);
 }
 
 void main() {
   const values = <String, String>{
-    'config': 'https://basketbrooktrails.com/config.php',
+    'endpoint': 'https://basketbrooktrails.com/config.php',
     'privacy': 'https://basketbrooktrails.com/privacy-policy.html',
     'support': 'https://basketbrooktrails.com/support.html',
     'gcd': 'https://gcdsdk.appsflyer.com/install_data/v5.0/',

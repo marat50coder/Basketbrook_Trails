@@ -3,9 +3,12 @@ import UIKit
 import UserNotifications
 
 class SceneDelegate: FlutterSceneDelegate {
-  // Must stay in sync with LaunchTapReader._dartKey in Dart
+  // Must stay in sync with LaunchTapReader._tapKey in Dart
   // (the `flutter.` prefix is added by the shared_preferences iOS plugin).
-  static let launchRouteKey = "flutter.bb_launch_route"
+  static let launchRouteKey = "flutter.bbtr_launch_destination"
+
+  private static let deepLinkKeys = ["deep_link", "target", "url", "deeplink", "link"]
+  private static let nestedContainers = ["payload", "data"]
 
   override func scene(
     _ scene: UIScene,
@@ -16,41 +19,42 @@ class SceneDelegate: FlutterSceneDelegate {
 
     guard
       let response = connectionOptions.notificationResponse,
-      let destination = Self.destination(
-        inside: response.notification.request.content.userInfo
+      let destination = Self.extractDestination(
+        from: response.notification.request.content.userInfo
       )
     else { return }
 
-    let defaults = UserDefaults.standard
-    defaults.set(destination, forKey: Self.launchRouteKey)
-    defaults.synchronize()
+    stash(destination)
 
     #if DEBUG
-    NSLog("[BB.ROUTE] captured notification destination")
+    NSLog("[BB.TRAIL] captured notification destination")
     #endif
   }
 
-  private static func destination(
-    inside payload: [AnyHashable: Any]
+  private func stash(_ destination: String) {
+    let defaults = UserDefaults.standard
+    defaults.set(destination, forKey: Self.launchRouteKey)
+    defaults.synchronize()
+  }
+
+  private static func extractDestination(
+    from payload: [AnyHashable: Any]
   ) -> String? {
-    let candidates = ["deep_link", "target", "url", "deeplink", "link"]
-
-    func firstValue(in dictionary: [AnyHashable: Any]) -> String? {
-      for candidate in candidates {
-        guard let value = dictionary[candidate] as? String else { continue }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty { return trimmed }
-      }
-      return nil
+    if let direct = firstNonEmpty(in: payload) { return direct }
+    for container in nestedContainers {
+      guard let nested = payload[container] as? [AnyHashable: Any] else { continue }
+      if let value = firstNonEmpty(in: nested) { return value }
     }
+    return nil
+  }
 
-    if let direct = firstValue(in: payload) { return direct }
-
-    for container in ["payload", "data"] {
-      if let nested = payload[container] as? [AnyHashable: Any],
-         let value = firstValue(in: nested) {
-        return value
-      }
+  private static func firstNonEmpty(
+    in dictionary: [AnyHashable: Any]
+  ) -> String? {
+    for candidate in deepLinkKeys {
+      guard let value = dictionary[candidate] as? String else { continue }
+      let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !trimmed.isEmpty { return trimmed }
     }
     return nil
   }

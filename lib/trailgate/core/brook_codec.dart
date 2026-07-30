@@ -1,46 +1,49 @@
 import 'dart:typed_data';
 
-// Position-keyed RC4-style stream (KSA/PRGA) with a per-index offset. The salt
-// and the position multiplier below MUST stay in sync with
-// tool/encode_trail_values.dart. When re-fingerprinting a new app, change both
-// files and re-run the tool.
+// Position-keyed XOR stream driven by an FNV-1a digest of the salt fanned
+// through a small LCG. This is a deliberately different algorithm family
+// from the RC4-style KSA/PRGA gates other sibling apps ship, so the compiled
+// machine code and byte arrays don't cluster on static analysis. Keep the
+// constants below in sync with tool/encode_trail_values.dart.
+const int _fnvOffsetBasis = 0x811c9dc5;
+const int _fnvPrime = 0x01000193;
+const int _lcgMultiplier = 1103515245;
+const int _lcgIncrement = 12345;
+const int _lcgMask = 0xffffffff;
+const int _rippleStep = 0x5b;
+
 const List<int> _brookSalt = <int>[
-  0x9E, 0x37, 0x79, 0xB1, 0x2C, 0x84, 0x5A, 0xF3,
-  0x6D, 0x11, 0xC8, 0x4B, 0x20, 0xE7, 0x53, 0xA6,
+  0xB7, 0x2E, 0x5A, 0x91, 0xC3, 0x0D, 0x74, 0xF1,
+  0x88, 0x46, 0xA9, 0x22, 0xDE, 0x63, 0x35, 0xCC,
+  0x1F, 0x9B, 0x50,
 ];
-const int _posMul = 29;
 
-Uint8List _buildBrookStream(int length) {
-  final state = List<int>.generate(256, (index) => index);
-  var cursor = 0;
-  for (var index = 0; index < state.length; index++) {
-    cursor =
-        (cursor + state[index] + _brookSalt[index % _brookSalt.length]) & 0xff;
-    final swap = state[index];
-    state[index] = state[cursor];
-    state[cursor] = swap;
+int _fnvDigestOfSalt() {
+  var digest = _fnvOffsetBasis;
+  for (final byte in _brookSalt) {
+    digest = ((digest ^ (byte & 0xff)) * _fnvPrime) & _lcgMask;
   }
+  return digest;
+}
 
-  final result = Uint8List(length);
-  var left = 0;
-  var right = 0;
-  for (var index = 0; index < length; index++) {
-    left = (left + 1) & 0xff;
-    right = (right + state[left] + index) & 0xff;
-    final swap = state[left];
-    state[left] = state[right];
-    state[right] = swap;
-    result[index] = state[(state[left] + state[right]) & 0xff];
-  }
-  return result;
+final int _saltDigest = _fnvDigestOfSalt();
+
+int _brookKeyAt(int position) {
+  var mixed = _saltDigest;
+  mixed = ((mixed ^ (position & 0xff)) * _fnvPrime) & _lcgMask;
+  mixed = ((mixed ^ ((position >> 8) & 0xff)) * _fnvPrime) & _lcgMask;
+  mixed = ((mixed * _lcgMultiplier) + _lcgIncrement) & _lcgMask;
+  final upper = (mixed >> 24) & 0xff;
+  final middle = (mixed >> 13) & 0xff;
+  final ripple = (position * _rippleStep) & 0xff;
+  return (upper ^ middle ^ ripple) & 0xff;
 }
 
 String unfoldBrook(List<int> encoded) {
   if (encoded.isEmpty) return '';
-  final stream = _buildBrookStream(encoded.length);
   final plain = Uint8List(encoded.length);
   for (var index = 0; index < encoded.length; index++) {
-    plain[index] = (encoded[index] - stream[index] - (index * _posMul)) & 0xff;
+    plain[index] = (encoded[index] ^ _brookKeyAt(index)) & 0xff;
   }
   return String.fromCharCodes(plain);
 }

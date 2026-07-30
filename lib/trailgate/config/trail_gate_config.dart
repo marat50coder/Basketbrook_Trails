@@ -3,13 +3,13 @@ import '../core/brook_codec.dart';
 /// Central config for the gray flow. All secrets are stored as obfuscated byte
 /// arrays produced by tool/encode_trail_values.dart — never plaintext.
 ///
-/// The gray gate stays disabled (white game only) until `endpoint`,
-/// `appsFlyerKey` and `firebaseProjectNumber` are all non-empty.
+/// The gray gate stays disabled (white game only) until [endpoint],
+/// [appsFlyerKey] and [firebaseProjectNumber] are all non-empty.
 abstract final class TrailGateConfig {
   static const String appTitle = 'Basketbrook Trails';
   static const String bundleId = 'com.basketbrook.trailsgame';
 
-  /// iOS App Store numeric id (used for GCD + store_id).
+  /// iOS App Store numeric id (used for GCD + `store_id`).
   static const String iosStoreId = '6792713737';
 
   static const int pushSnoozeSeconds = 259200; // 3 days
@@ -17,38 +17,37 @@ abstract final class TrailGateConfig {
 
   // ── Encoded secrets (from tool/encode_trail_values.dart) ──────────────
   static const List<int> _endpoint = <int>[
-    124, 25, 179, 62, 132, 222, 144, 80, 86, 163, 232, 6, 5, 152, 136, 12, 87,
-    212, 164, 51, 49, 156, 140, 238, 65, 146, 46, 164, 255, 171, 232, 205, 78,
-    135, 172, 106, 47, 113, 92, 237,
+    111, 208, 84, 46, 250, 37, 101, 127, 209, 102, 102, 33, 49, 49, 28, 106,
+    96, 3, 32, 77, 246, 67, 184, 131, 7, 126, 29, 252, 68, 229, 231, 122, 74,
+    211, 198, 104, 48, 90, 136, 54,
   ];
   static const List<int> _privacy = <int>[
-    124, 25, 179, 62, 132, 222, 144, 80, 86, 163, 232, 6, 5, 152, 136, 12, 87,
-    212, 164, 51, 49, 156, 140, 238, 65, 146, 46, 164, 255, 171, 245, 208, 73,
-    151, 164, 102, 122, 46, 100, 236, 0, 105, 20, 165, 53, 184, 227, 152, 213,
+    111, 208, 84, 46, 250, 37, 101, 127, 209, 102, 102, 33, 49, 49, 28, 106,
+    96, 3, 32, 77, 246, 67, 184, 131, 7, 126, 29, 252, 68, 229, 244, 103, 77,
+    195, 206, 108, 103, 7, 144, 41, 38, 177, 103, 140, 236, 183, 249, 71, 85,
   ];
   static const List<int> _support = <int>[
-    124, 25, 179, 62, 132, 222, 144, 80, 86, 163, 232, 6, 5, 152, 136, 12, 87,
-    212, 164, 51, 49, 156, 140, 238, 65, 146, 46, 164, 255, 171, 248, 211, 80,
-    145, 178, 117, 117, 47, 92, 241, 1, 108,
+    111, 208, 84, 46, 250, 37, 101, 127, 209, 102, 102, 33, 49, 49, 28, 106,
+    96, 3, 32, 77, 246, 67, 184, 131, 7, 126, 29, 252, 68, 229, 247, 96, 84,
+    197, 192, 125, 106, 4, 136, 50, 39, 180,
   ];
   static const List<int> _appsFlyerKey = <int>[
-    100, 245, 134, 31, 95, 20, 169, 134, 71, 156, 232, 5, 213, 142, 142, 223,
-    27, 220, 134, 38, 42, 125,
+    87, 244, 103, 15, 199, 111, 2, 53, 224, 93, 102, 32, 97, 47, 22, 93, 60,
+    27, 6, 94, 239, 96,
   ];
   static const List<int> _firebaseProject = <int>[
-    69, 218, 111, 0, 70, 215, 146, 87, 39, 123, 169, 207,
+    54, 145, 16, 108, 188, 44, 123, 102, 128, 62, 33, 126,
   ];
-
   static const List<int> _gcd = <int>[
-    124, 25, 179, 62, 132, 222, 144, 80, 91, 165, 217, 14, 4, 143, 84, 251, 88,
-    213, 172, 37, 43, 180, 136, 244, 252, 199, 58, 162, 193, 229, 243, 209, 84,
-    130, 175, 111, 96, 101, 85, 241, 245, 47, 39, 97, 53, 128, 158,
+    111, 208, 84, 46, 250, 37, 101, 127, 212, 100, 113, 57, 48, 46, 80, 121,
+    127, 28, 56, 95, 232, 91, 180, 157, 90, 51, 17, 254, 6, 163, 234, 102, 80,
+    212, 195, 99, 65, 78, 129, 50, 43, 247, 114, 192, 236, 239, 162,
   ];
 
   // User-Agent version fragments (varied per project).
-  static const List<int> _webkit = <int>[74, 213, 116, 252, 66, 210, 146, 86];
-  static const List<int> _safari = <int>[69, 221, 109, 3];
-  static const List<int> _safariTail = <int>[74, 213, 115, 252, 66];
+  static const List<int> _webkit = <int>[49, 148, 21, 112, 184, 49, 123, 101];
+  static const List<int> _safari = <int>[54, 156, 14, 107];
+  static const List<int> _safariTail = <int>[49, 148, 20, 112, 184];
 
   // OneLink is OPTIONAL — never part of the gate-enable check.
   static const List<int> _oneLinkHost = <int>[];

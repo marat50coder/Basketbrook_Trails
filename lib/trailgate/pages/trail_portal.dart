@@ -44,6 +44,7 @@ class _TrailPortalState extends State<TrailPortal> with WidgetsBindingObserver {
   int _redirectAttempts = 0;
   String? _lastMainUrl;
   Timer? _metricsDebounce;
+  Timer? _reflowTimer;
   Size? _lastMetricsSize;
 
   @override
@@ -138,28 +139,36 @@ class _TrailPortalState extends State<TrailPortal> with WidgetsBindingObserver {
     _lastMetricsSize = size;
     if (!rotated) return;
     _enterImmersive();
-    _metricsDebounce?.cancel();
-    _pokeReflow(const [40, 160, 320, 560, 850]);
+    _scheduleRotationSettle();
   }
 
-  void _pokeReflow(List<int> delaysMs) {
-    for (final ms in delaysMs) {
-      Timer(Duration(milliseconds: ms), () {
-        if (!mounted) return;
-        _controller.runJavaScript(
-          'window.dispatchEvent(new Event("orientationchange"));'
-          'window.dispatchEvent(new Event("resize"));'
-          'if(window.visualViewport)'
-          '  window.visualViewport.dispatchEvent(new Event("resize"));',
-        ).catchError((_) {});
-      });
-    }
-    _metricsDebounce = Timer(const Duration(milliseconds: 320), () {
+  /// Fires a SINGLE resize dispatch after the native rotation animation has
+  /// settled. Earlier versions dispatched five bursts (40/160/320/560/850
+  /// ms) as WKWebView-safety, but that visibly shook responsive sites that
+  /// already reflow on the native rotation event. One well-timed poke gets
+  /// WKWebView to recalc its viewport without stacking synthetic reflows on
+  /// top of the site's own layout code.
+  void _scheduleRotationSettle() {
+    _reflowTimer?.cancel();
+    _metricsDebounce?.cancel();
+    _reflowTimer = Timer(const Duration(milliseconds: 420), () {
+      if (!mounted) return;
+      _controller.runJavaScript(_reflowScript).catchError((_) {});
+    });
+    _metricsDebounce = Timer(const Duration(milliseconds: 520), () {
       if (!mounted) return;
       _installInsetGuard();
       _installZoomLock();
     });
   }
+
+  static const String _reflowScript = r'''
+;(function(w){
+  try { w.dispatchEvent(new Event('resize')); } catch (e) {}
+  var vv = w.visualViewport;
+  if (vv) { try { vv.dispatchEvent(new Event('resize')); } catch (e) {} }
+})(window);
+''';
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -190,23 +199,18 @@ class _TrailPortalState extends State<TrailPortal> with WidgetsBindingObserver {
         _installKeyboardLift();
         _installFocusScaleGuard();
         _installInlinePlayback();
+
         // Post-load reflow — NO `_controller.reload()`. `_settleColdViewport`
         // parks the WebView for 280 ms while immersive mode settles, so the
         // first render is already in the final viewport. The reload used to
         // be here as a safety net, but on the current backend it invalidates
         // one-time deep-link tokens and the second request lands on the
         // site's home page — which the user experiences as "correct window
-        // opens, then the WebView kicks me out". Rely on JS resize +
-        // orientationchange to smooth over any residual pre-immersive layout.
-        Future<void>.delayed(const Duration(milliseconds: 800), () async {
+        // opens, then the WebView kicks me out". A single dozed resize
+        // handles residual pre-immersive layout without shaking the page.
+        Future<void>.delayed(const Duration(milliseconds: 760), () async {
           if (!mounted) return;
-          setState(() {});
-          await _controller.runJavaScript(
-            'window.dispatchEvent(new Event("orientationchange"));'
-            'window.dispatchEvent(new Event("resize"));'
-            'if(window.visualViewport)'
-            '  window.visualViewport.dispatchEvent(new Event("resize"));',
-          );
+          await _controller.runJavaScript(_reflowScript);
         });
       },
       onWebResourceError: (error) {
@@ -288,146 +292,199 @@ class _TrailPortalState extends State<TrailPortal> with WidgetsBindingObserver {
 
   void _installInsetGuard() {
     _controller.runJavaScript(r'''
-(() => {
-  const root = window;
-  if (root.__bbInsetKeeper) return;
-  root.__bbInsetKeeper = true;
-  const marker = 'bb-inset-sheet';
-  const rules = [
-    ':root{',
-    '--safe-area-inset-top:0px!important;',
-    '--safe-area-inset-right:0px!important;',
-    '--safe-area-inset-bottom:0px!important;',
-    '--safe-area-inset-left:0px!important;',
-    '--sat:0px!important;--sar:0px!important;',
-    '--sab:0px!important;--sal:0px!important;',
-    '--safe-top:0px!important;--safe-right:0px!important;',
-    '--safe-bottom:0px!important;--safe-left:0px!important;',
-    '}',
-    'html,body{overscroll-behavior:none!important;',
-    'overscroll-behavior-y:none!important;}'
-  ].join('');
-  const keyboardVisible = () => {
-    const visual = root.visualViewport;
-    return !!visual && visual.height < root.innerHeight * 0.75;
-  };
-  const refresh = () => {
-    if (keyboardVisible()) return;
-    const host = document.head || document.documentElement;
+;(function(scope){
+  var STAMP = 'brookInsetSweep';
+  if (scope[STAMP]) return;
+  scope[STAMP] = 1;
+
+  var STYLE_ID = 'bt-brook-inset';
+  var VIEWPORT_FIT = 'viewport-fit=contain';
+  var VIEWPORT_BASE = 'width=device-width, initial-scale=1, ' + VIEWPORT_FIT;
+
+  function buildRules(){
+    var vars = ':root{';
+    var pairs = [
+      'safe-area-inset-top','safe-area-inset-right',
+      'safe-area-inset-bottom','safe-area-inset-left',
+      'sat','sar','sab','sal',
+      'safe-top','safe-right','safe-bottom','safe-left'
+    ];
+    for (var i = 0; i < pairs.length; i++) {
+      vars += '--' + pairs[i] + ':0px!important;';
+    }
+    vars += '}';
+    var body = 'html,body{overscroll-behavior:none!important;' +
+              'overscroll-behavior-y:none!important;}';
+    return vars + body;
+  }
+
+  var RULES = buildRules();
+
+  function isKeyboardOpen(){
+    var vv = scope.visualViewport;
+    if (!vv) return false;
+    return vv.height < scope.innerHeight * 0.75;
+  }
+
+  function ensureMetaViewport(host){
+    var meta = document.querySelector('meta[name="viewport"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.setAttribute('name', 'viewport');
+      meta.setAttribute('content', VIEWPORT_BASE);
+      host.appendChild(meta);
+      return;
+    }
+    var content = (meta.getAttribute('content') || '')
+      .replace(/,?\s*viewport-fit\s*=\s*\w+/ig, '')
+      .trim();
+    meta.setAttribute('content',
+      content ? content + ', ' + VIEWPORT_FIT : VIEWPORT_BASE);
+  }
+
+  function ensureStyleSheet(host){
+    var node = document.getElementById(STYLE_ID);
+    if (!node) {
+      node = document.createElement('style');
+      node.id = STYLE_ID;
+      host.appendChild(node);
+    }
+    if (node.textContent !== RULES) node.textContent = RULES;
+  }
+
+  function apply(){
+    if (isKeyboardOpen()) return;
+    var host = document.head || document.documentElement;
     if (!host) return;
-    let viewport = document.querySelector('meta[name="viewport"]');
-    if (!viewport) {
-      viewport = document.createElement('meta');
-      viewport.name = 'viewport';
-      viewport.content = 'width=device-width, initial-scale=1, viewport-fit=contain';
-      host.appendChild(viewport);
-    } else {
-      const clean = (viewport.content || '')
-        .replace(/,?\s*viewport-fit\s*=\s*\w+/ig, '').trim();
-      viewport.content = `${clean}${clean ? ', ' : ''}viewport-fit=contain`;
-    }
-    let sheet = document.getElementById(marker);
-    if (!sheet) {
-      sheet = document.createElement('style');
-      sheet.id = marker;
-      host.appendChild(sheet);
-    }
-    sheet.textContent = rules;
-  };
-  const schedule = () => {
-    root.setTimeout(refresh, 170);
-    root.setTimeout(refresh, 640);
-  };
-  ['pushState', 'replaceState'].forEach((name) => {
-    const original = history[name];
-    history[name] = function(...args) {
-      const result = original.apply(this, args);
-      schedule();
-      return result;
+    ensureMetaViewport(host);
+    ensureStyleSheet(host);
+  }
+
+  function reapplyBurst(){
+    scope.setTimeout(apply, 170);
+    scope.setTimeout(apply, 640);
+  }
+
+  var wrapHistoryFn = function(name){
+    var orig = history[name];
+    if (typeof orig !== 'function') return;
+    history[name] = function(){
+      var out = orig.apply(this, arguments);
+      reapplyBurst();
+      return out;
     };
-  });
-  root.addEventListener('popstate', schedule);
-  refresh();
-  root.setInterval(refresh, 2900);
-})();
+  };
+  wrapHistoryFn('pushState');
+  wrapHistoryFn('replaceState');
+  scope.addEventListener('popstate', reapplyBurst);
+
+  apply();
+  scope.setInterval(apply, 2900);
+})(window);
 ''');
   }
 
   void _installZoomLock() {
     _controller.runJavaScript(r'''
-(() => {
-  if (window.__bbZoomLock) return;
-  window.__bbZoomLock = true;
-  const lockViewport = () => {
-    const host = document.head || document.documentElement;
+;(function(){
+  var STAMP = 'brookZoomLatch';
+  if (window[STAMP]) return;
+  window[STAMP] = 1;
+
+  var VP = 'width=device-width, initial-scale=1.0, ' +
+           'maximum-scale=1.0, minimum-scale=1.0, ' +
+           'user-scalable=no, viewport-fit=contain';
+
+  function affix(){
+    var host = document.head || document.documentElement;
     if (!host) return;
-    let vp = document.querySelector('meta[name="viewport"]');
-    if (!vp) {
-      vp = document.createElement('meta');
-      vp.setAttribute('name', 'viewport');
-      host.appendChild(vp);
+    var meta = document.querySelector('meta[name="viewport"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.setAttribute('name', 'viewport');
+      host.appendChild(meta);
     }
-    vp.setAttribute('content',
-      'width=device-width, initial-scale=1.0, maximum-scale=1.0, ' +
-      'minimum-scale=1.0, user-scalable=no, viewport-fit=contain');
-  };
-  lockViewport();
-  const stop = (e) => { e.preventDefault(); };
-  ['gesturestart', 'gesturechange', 'gestureend'].forEach((t) =>
-    document.addEventListener(t, stop, {passive: false}));
-  document.addEventListener('touchmove', (e) => {
-    if (e.scale !== undefined && e.scale !== 1) e.preventDefault();
+    if (meta.getAttribute('content') !== VP) {
+      meta.setAttribute('content', VP);
+    }
+  }
+  affix();
+
+  function halt(event){ event.preventDefault(); }
+  var gestures = ['gesturestart', 'gesturechange', 'gestureend'];
+  for (var g = 0; g < gestures.length; g++) {
+    document.addEventListener(gestures[g], halt, {passive: false});
+  }
+
+  document.addEventListener('touchmove', function(event){
+    if (event.scale !== undefined && event.scale !== 1) event.preventDefault();
   }, {passive: false});
-  let lastTap = 0;
-  document.addEventListener('touchend', (e) => {
-    const now = Date.now();
-    if (now - lastTap <= 300) e.preventDefault();
-    lastTap = now;
+
+  var doubleTapWindow = 300;
+  var lastTapAt = 0;
+  document.addEventListener('touchend', function(event){
+    var stamp = Date.now();
+    if (stamp - lastTapAt <= doubleTapWindow) event.preventDefault();
+    lastTapAt = stamp;
   }, {passive: false});
-  ['pushState', 'replaceState'].forEach((name) => {
-    const original = history[name];
-    history[name] = function(...args) {
-      const result = original.apply(this, args);
-      setTimeout(lockViewport, 150);
-      return result;
+
+  ['pushState', 'replaceState'].forEach(function(fn){
+    var prev = history[fn];
+    if (typeof prev !== 'function') return;
+    history[fn] = function(){
+      var res = prev.apply(this, arguments);
+      window.setTimeout(affix, 150);
+      return res;
     };
   });
-  window.addEventListener('popstate', () => setTimeout(lockViewport, 150));
+  window.addEventListener('popstate', function(){
+    window.setTimeout(affix, 150);
+  });
 })();
 ''');
   }
 
   void _installTapPolish() {
     _controller.runJavaScript(r'''
-(() => {
-  if (window.__bbTapPolish) return;
-  window.__bbTapPolish = true;
-  const style = document.createElement('style');
-  style.id = 'bb-tap-polish';
-  style.textContent =
-    '*{-webkit-tap-highlight-color:transparent!important;}' +
-    '*:not(input):not(textarea):not([contenteditable="true"]){' +
-      '-webkit-touch-callout:none!important;}';
-  (document.head || document.documentElement).appendChild(style);
+;(function(){
+  var STAMP = 'brookTapVeneer';
+  if (window[STAMP]) return;
+  window[STAMP] = 1;
+
+  var sheet = document.createElement('style');
+  sheet.setAttribute('id', 'bt-brook-tap');
+  var css = '';
+  css += '*{-webkit-tap-highlight-color:transparent!important;}';
+  css += '*:not(input):not(textarea):not([contenteditable="true"])';
+  css += '{-webkit-touch-callout:none!important;}';
+  sheet.appendChild(document.createTextNode(css));
+  (document.head || document.documentElement).appendChild(sheet);
 })();
 ''');
   }
 
   void _installKeyboardLift() {
     _controller.runJavaScript(r'''
-(() => {
-  if (window.__bbInputLift) return;
-  window.__bbInputLift = true;
-  const editable = (node) => !!node && (
-    node.matches?.('input, textarea, select, [contenteditable="true"]')
-  );
-  const reveal = () => {
-    const active = document.activeElement;
-    if (!editable(active)) return;
-    active.scrollIntoView({behavior: 'auto', block: 'nearest'});
-  };
-  document.addEventListener('focusin', (event) => {
-    if (editable(event.target)) window.setTimeout(reveal, 350);
+;(function(){
+  var STAMP = 'brookInputSurface';
+  if (window[STAMP]) return;
+  window[STAMP] = 1;
+
+  var SELECTOR = 'input, textarea, select, [contenteditable="true"]';
+  var REVEAL_DELAY = 350;
+
+  function isEditable(node){
+    return !!node && typeof node.matches === 'function' &&
+      node.matches(SELECTOR);
+  }
+  function surface(){
+    var focus = document.activeElement;
+    if (!isEditable(focus)) return;
+    focus.scrollIntoView({behavior: 'auto', block: 'nearest'});
+  }
+  document.addEventListener('focusin', function(event){
+    if (!isEditable(event.target)) return;
+    window.setTimeout(surface, REVEAL_DELAY);
   }, true);
 })();
 ''');
@@ -436,40 +493,57 @@ class _TrailPortalState extends State<TrailPortal> with WidgetsBindingObserver {
   void _installFocusScaleGuard() {
     if (!Platform.isIOS) return;
     _controller.runJavaScript(r'''
-(() => {
-  if (window.__bbFocusScale) return;
-  window.__bbFocusScale = true;
-  const style = document.createElement('style');
-  style.textContent =
+;(function(){
+  var STAMP = 'brookFontFloor';
+  if (window[STAMP]) return;
+  window[STAMP] = 1;
+  var sheet = document.createElement('style');
+  sheet.appendChild(document.createTextNode(
     'input,textarea,select,[contenteditable="true"]{' +
-    'font-size:max(16px,1em)!important;}';
-  (document.head || document.documentElement).appendChild(style);
+    'font-size:max(16px,1em)!important;}'
+  ));
+  (document.head || document.documentElement).appendChild(sheet);
 })();
 ''');
   }
 
   void _installInlinePlayback() {
     _controller.runJavaScript(r'''
-(() => {
-  if (window.__bbInlineMedia) return;
-  window.__bbInlineMedia = true;
-  const awaken = (video) => {
-    if (!(video instanceof HTMLVideoElement)) return;
-    video.setAttribute('playsinline', '');
-    video.setAttribute('webkit-playsinline', '');
-    video.playsInline = true;
-    video.autoplay = true;
-    const attempt = video.play();
-    if (attempt?.catch) attempt.catch(() => {});
-  };
-  const scan = (node) => {
-    if (node instanceof HTMLVideoElement) awaken(node);
-    node.querySelectorAll?.('video').forEach(awaken);
-  };
-  scan(document);
-  new MutationObserver((records) => {
-    records.forEach((record) => record.addedNodes.forEach(scan));
-  }).observe(document.documentElement, {childList: true, subtree: true});
+;(function(){
+  var STAMP = 'brookInlineReel';
+  if (window[STAMP]) return;
+  window[STAMP] = 1;
+
+  function primeVideo(node){
+    if (!(node instanceof HTMLVideoElement)) return;
+    node.setAttribute('playsinline', '');
+    node.setAttribute('webkit-playsinline', '');
+    node.playsInline = true;
+    node.autoplay = true;
+    var promise = node.play();
+    if (promise && typeof promise.catch === 'function') {
+      promise.catch(function(){});
+    }
+  }
+  function traverse(root){
+    if (!root) return;
+    if (root instanceof HTMLVideoElement) primeVideo(root);
+    if (typeof root.querySelectorAll !== 'function') return;
+    var found = root.querySelectorAll('video');
+    for (var i = 0; i < found.length; i++) primeVideo(found[i]);
+  }
+  traverse(document);
+
+  var observer = new MutationObserver(function(records){
+    for (var r = 0; r < records.length; r++) {
+      var added = records[r].addedNodes;
+      for (var a = 0; a < added.length; a++) traverse(added[a]);
+    }
+  });
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
 })();
 ''');
   }
@@ -478,6 +552,7 @@ class _TrailPortalState extends State<TrailPortal> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _metricsDebounce?.cancel();
+    _reflowTimer?.cancel();
     _networkSubscription?.cancel();
     widget.notifications.onDestination = null;
     SystemChrome.setEnabledSystemUIMode(

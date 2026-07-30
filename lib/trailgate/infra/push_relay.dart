@@ -5,14 +5,36 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 
 import 'trail_vault.dart';
 
+/// Registered as the FCM background-message handler. Must be a top-level
+/// `@pragma('vm:entry-point')` function so Firebase can wire it up from a
+/// fresh isolate — we don't do any real work here, we only need the plugin
+/// to consider background delivery configured.
 @pragma('vm:entry-point')
 Future<void> bbBackgroundMessage(RemoteMessage _) async {}
 
+/// FCM/APNs wrapper. The push token is refreshed opportunistically and the
+/// user's tap intent is stashed into [TrailVault] so the boot pipeline can
+/// consume it — the WebView is not always mounted when a push arrives.
 class PushRelay {
   PushRelay(this._vault, {required this.enabled});
 
+  static const Duration _initialTimeout = Duration(seconds: 4);
+  static const Duration _apnsInterval = Duration(milliseconds: 550);
+  static const int _passiveApnsAttempts = 6;
+  static const int _postGrantApnsAttempts = 14;
+
+  static const List<String> _urlKeys = <String>[
+    'deep_link',
+    'target',
+    'url',
+    'deeplink',
+    'link',
+  ];
+  static const List<String> _nestedKeys = <String>['payload', 'data'];
+
   final TrailVault _vault;
   final bool enabled;
+
   FirebaseMessaging? _messaging;
   Future<void>? _bootFuture;
   Future<bool>? _permissionFuture;
@@ -29,22 +51,14 @@ class PushRelay {
     if (!enabled) return;
     final messaging = FirebaseMessaging.instance;
     _messaging = messaging;
-    // Drain the initial message so Firebase's internal queue is emptied, but
-    // DO NOT stash it on iOS — SceneDelegate already delivered the cold-start
-    // URL through UserDefaults → LaunchTapReader → the coordinator's cold
-    // route. Stashing here would leave a duplicate in vault that a later
-    // lifecycle-resume `_consumePending` picks up and re-loads on top of the
-    // page the user is already reading (looks like: correct window opens →
-    // WebView reloads → the site redirects to home because the deep-link
-    // tokens have already been spent).
-    final initial = await messaging.getInitialMessage().timeout(
-      const Duration(seconds: 4),
-      onTimeout: () => null,
-    );
-    if (!Platform.isIOS) {
-      final initialUrl = initial == null ? null : _extract(initial.data);
-      if (initialUrl != null) await _vault.stashPushUrl(initialUrl);
-    }
+
+    // Drain the initial message so Firebase's internal queue is emptied,
+    // but DO NOT stash it on iOS — SceneDelegate already delivered the
+    // cold-start URL through UserDefaults → LaunchTapReader → the
+    // coordinator's cold route. Stashing here would leave a duplicate in
+    // vault that a later lifecycle-resume `_consumePending` picks up and
+    // re-loads on top of the page the user is already reading.
+    await _drainInitialMessage(messaging);
 
     FirebaseMessaging.onBackgroundMessage(bbBackgroundMessage);
     await messaging.setForegroundNotificationPresentationOptions(
@@ -52,53 +66,74 @@ class PushRelay {
       badge: true,
       sound: true,
     );
-    messaging.onTokenRefresh.listen((value) {
-      _token = value;
-      onTokenChanged?.call(value);
-    });
-    FirebaseMessaging.onMessageOpenedApp.listen((message) {
-      final url = _extract(message.data);
-      if (url == null) return;
-      final callback = onDestination;
-      if (callback == null) {
-        _vault.stashPushUrl(url);
-      } else {
-        callback(url);
-      }
-    });
-    await _waitForApns();
-    _token = await messaging.getToken();
+
+    messaging.onTokenRefresh.listen(_handleTokenRefresh);
+    FirebaseMessaging.onMessageOpenedApp.listen(_handleForegroundTap);
+
+    await _waitForApns(_passiveApnsAttempts);
+    _token = await _fetchToken(messaging);
+  }
+
+  Future<void> _drainInitialMessage(FirebaseMessaging messaging) async {
+    final initial = await messaging.getInitialMessage().timeout(
+          _initialTimeout,
+          onTimeout: () => null,
+        );
+    if (Platform.isIOS) return;
+    if (initial == null) return;
+    final url = _extract(initial.data);
+    if (url != null) await _vault.stashPushUrl(url);
+  }
+
+  void _handleTokenRefresh(String value) {
+    _token = value;
+    onTokenChanged?.call(value);
+  }
+
+  void _handleForegroundTap(RemoteMessage message) {
+    final url = _extract(message.data);
+    if (url == null) return;
+    final consumer = onDestination;
+    if (consumer != null) {
+      consumer(url);
+    } else {
+      _vault.stashPushUrl(url);
+    }
+  }
+
+  Future<String?> _fetchToken(FirebaseMessaging messaging) async {
+    try {
+      return await messaging.getToken();
+    } catch (_) {
+      return null;
+    }
   }
 
   String? _extract(Map<String, dynamic> payload) {
-    for (final key in const <String>[
-      'deep_link',
-      'target',
-      'url',
-      'deeplink',
-      'link',
-    ]) {
+    for (final key in _urlKeys) {
       final value = payload[key];
-      if (value is String && value.trim().isNotEmpty) return value.trim();
+      if (value is! String) continue;
+      final trimmed = value.trim();
+      if (trimmed.isNotEmpty) return trimmed;
     }
-    for (final container in const <String>['payload', 'data']) {
-      final nested = payload[container];
-      if (nested is Map) {
-        final found = _extract(Map<String, dynamic>.from(nested));
-        if (found != null) return found;
-      }
+    for (final key in _nestedKeys) {
+      final nested = payload[key];
+      if (nested is! Map) continue;
+      final found = _extract(Map<String, dynamic>.from(nested));
+      if (found != null) return found;
     }
     return null;
   }
 
-  Future<void> _waitForApns({int attempts = 6}) async {
+  Future<void> _waitForApns(int attempts) async {
     final messaging = _messaging;
     if (messaging == null) return;
     for (var attempt = 0; attempt < attempts; attempt++) {
       try {
-        if ((await messaging.getAPNSToken())?.isNotEmpty ?? false) return;
+        final token = await messaging.getAPNSToken();
+        if (token != null && token.isNotEmpty) return;
       } catch (_) {}
-      await Future<void>.delayed(const Duration(milliseconds: 550));
+      await Future<void>.delayed(_apnsInterval);
     }
   }
 
@@ -106,8 +141,9 @@ class PushRelay {
     if (!enabled || _vault.pushDeniedByOs) return false;
     final messaging = _messaging;
     if (messaging == null) return false;
-    final status =
-        (await messaging.getNotificationSettings()).authorizationStatus;
+
+    final settings = await messaging.getNotificationSettings();
+    final status = settings.authorizationStatus;
     if (status == AuthorizationStatus.denied) {
       await _vault.markPushDeniedByOs();
       return false;
@@ -117,31 +153,39 @@ class PushRelay {
   }
 
   Future<bool> askPermission() {
-    return _permissionFuture ??= _performPermissionRequest().whenComplete(
-      () => _permissionFuture = null,
-    );
+    return _permissionFuture ??=
+        _performPermissionRequest().whenComplete(() {
+      _permissionFuture = null;
+    });
   }
 
   Future<bool> _performPermissionRequest() async {
-    if (!enabled || _messaging == null) return false;
-    final result = await _messaging!.requestPermission(
+    final messaging = _messaging;
+    if (!enabled || messaging == null) return false;
+
+    final result = await messaging.requestPermission(
       alert: true,
       badge: true,
       sound: true,
       provisional: false,
     );
-    final accepted =
-        result.authorizationStatus == AuthorizationStatus.authorized ||
-        result.authorizationStatus == AuthorizationStatus.provisional;
+    final accepted = _isAccepted(result.authorizationStatus);
     await _vault.setPushAllowed(accepted);
+
     if (!accepted && result.authorizationStatus == AuthorizationStatus.denied) {
       await _vault.markPushDeniedByOs();
     }
-    if (accepted) {
-      await _waitForApns(attempts: 14);
-      _token = await _messaging!.getToken();
-      if (_token?.isNotEmpty ?? false) onTokenChanged?.call(_token!);
-    }
-    return accepted;
+    if (!accepted) return false;
+
+    await _waitForApns(_postGrantApnsAttempts);
+    _token = await _fetchToken(messaging);
+    final fresh = _token;
+    if (fresh != null && fresh.isNotEmpty) onTokenChanged?.call(fresh);
+    return true;
+  }
+
+  bool _isAccepted(AuthorizationStatus status) {
+    return status == AuthorizationStatus.authorized ||
+        status == AuthorizationStatus.provisional;
   }
 }

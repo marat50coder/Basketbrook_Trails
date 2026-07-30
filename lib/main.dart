@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,14 +14,12 @@ import 'loading/loading_screen.dart';
 import 'menu/home_screen.dart';
 import 'trailgate/boot_gate.dart';
 import 'trailgate/config/trail_gate_config.dart';
-import 'trailgate/core/gate_models.dart';
 import 'trailgate/infra/gate_exchange.dart';
 import 'trailgate/infra/push_relay.dart';
 import 'trailgate/infra/reach_probe.dart';
 import 'trailgate/infra/trail_agent.dart';
 import 'trailgate/infra/trail_attribution.dart';
 import 'trailgate/infra/trail_vault.dart';
-import 'trailgate/pages/trail_portal.dart';
 import 'trailgate/trail_coordinator.dart';
 
 Future<void> main() async {
@@ -39,6 +39,13 @@ Future<void> main() async {
   await Future.wait<void>(<Future<void>>[
     vault.initialize(),
     agent.prepare(),
+    // Decode the boot artwork before the first frame so each gray-flow screen
+    // paints its image immediately — no flash of the scaffold background
+    // colour between the loading, notification and portal screens.
+    _warmBootArt('assets/Basketbrook_Trails_additional_assets/Vertical_Loading_Screen.webp'),
+    _warmBootArt('assets/Basketbrook_Trails_additional_assets/Horizontal_Loading_Screen.webp'),
+    _warmBootArt('assets/Vertical_Notifications_Screen.webp'),
+    _warmBootArt('assets/Horizontal_Notifications_Screen.webp'),
   ]);
 
   final storage = await storageFuture;
@@ -93,7 +100,28 @@ Future<void> main() async {
   runApp(BasketbrookApp(state: state, coordinator: coordinator));
 }
 
-class BasketbrookApp extends StatefulWidget {
+/// Resolves and decodes an asset image into Flutter's image cache before the
+/// first frame. Once cached, `Image.asset` paints it synchronously on its very
+/// first build, so the loading screen never flashes its background colour.
+Future<void> _warmBootArt(String asset) {
+  final completer = Completer<void>();
+  final stream = AssetImage(asset).resolve(ImageConfiguration.empty);
+  late final ImageStreamListener listener;
+  listener = ImageStreamListener(
+    (_, _) {
+      stream.removeListener(listener);
+      if (!completer.isCompleted) completer.complete();
+    },
+    onError: (_, _) {
+      stream.removeListener(listener);
+      if (!completer.isCompleted) completer.complete();
+    },
+  );
+  stream.addListener(listener);
+  return completer.future;
+}
+
+class BasketbrookApp extends StatelessWidget {
   const BasketbrookApp({
     super.key,
     required this.state,
@@ -104,60 +132,15 @@ class BasketbrookApp extends StatefulWidget {
   final TrailCoordinator coordinator;
 
   @override
-  State<BasketbrookApp> createState() => _BasketbrookAppState();
-}
-
-class _BasketbrookAppState extends State<BasketbrookApp> {
-  final GlobalKey<NavigatorState> _navKey = GlobalKey<NavigatorState>();
-
-  @override
-  void initState() {
-    super.initState();
-    widget.coordinator.onLatePortal = _routeLatePortal;
-  }
-
-  @override
-  void dispose() {
-    if (widget.coordinator.onLatePortal == _routeLatePortal) {
-      widget.coordinator.onLatePortal = null;
-    }
-    super.dispose();
-  }
-
-  /// AppsFlyer delivered non-organic data *after* the initial gate decision
-  /// (e.g. the user was already routed to the white game via a 404 fallback).
-  /// Swap the top route for the portal — the game state stays alive underneath
-  /// in case the user re-opens the app.
-  void _routeLatePortal(PortalStop stop) {
-    final navigator = _navKey.currentState;
-    if (navigator == null) return;
-    final coordinator = widget.coordinator;
-    navigator.pushAndRemoveUntil(
-      MaterialPageRoute<void>(
-        builder: (_) => TrailPortal(
-          url: stop.url,
-          coldLaunch: stop.coldLaunch,
-          vault: coordinator.vault,
-          probe: coordinator.probe,
-          notifications: coordinator.notifications,
-          agent: coordinator.agent,
-        ),
-      ),
-      (_) => false,
-    );
-  }
-
-  @override
   Widget build(BuildContext context) {
     return ChangeNotifierProvider.value(
-      value: widget.state,
+      value: state,
       child: MaterialApp(
-        navigatorKey: _navKey,
         title: 'Basketbrook Trails',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.build(),
         home: BootGate(
-          coordinator: widget.coordinator,
+          coordinator: coordinator,
           gameBuilder: (_) => const GameRoot(),
         ),
       ),

@@ -50,6 +50,14 @@
 	</dict>
 	<key>NSUserTrackingUsageDescription</key>
 	<string>Your device identifier helps us understand which Basketbrook Trails campaigns brought you to the game.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Basketbrook Trails needs camera access so you can take and upload a photo.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Basketbrook Trails needs photo library access so you can choose and upload a photo.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Basketbrook Trails needs permission to save photos to your library.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Basketbrook Trails needs microphone access to record and upload media.</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>
